@@ -1,6 +1,3 @@
-
-
-````
 # Local AI PPT Maker
 
 A local-first AI presentation generator inspired by Gamma.
@@ -248,24 +245,3 @@ Local-agents/
 ├── generated/
 │
 └── README.md
-````
-
-## Development Roadmap
-
-```
-Phase 1   Local Qwen3-4B Inference          ✅
-Phase 2   Presentation Planner              ✅
-Phase 3   Presentation IR                   ✅
-Phase 4   Layout Engine                     ✅
-Phase 5   Editable PPTX Renderer            ✅
-Phase 6   Asset Routing + FLUX              ✅
-Phase 7   Production Asset Engine           ▶
-Phase 8   Icons / Diagrams / Charts         ○
-Phase 9   Full Generation Pipeline          ○
-Phase 10  Quality Control                   ○
-Phase 11  React/Vite UI                     ○
-Phase 12  AI Slide Editor                   ○
-Phase 13  Themes / Templates                ○
-Phase 14  Research / Web Grounding          ○
-Phase 15  Project Management / Export       ○
-```
