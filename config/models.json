@@ -3,9 +3,22 @@
     "name": "Qwen3-4B",
     "runtime": "llama.cpp",
     "path": "D:\\all project\\Projects\\AI projects\\ai assentent\\Local_codex\\models\\chat\\qwen3-4b\\Qwen3-4B-Q4_K_M.gguf",
-    "context_size": 8192,
+    "context_size": 4096,
     "temperature": 0.7,
     "n_gpu_layers": -1,
-    "flash_attention": true
+    "flash_attention": true,
+    "n_batch": 512,
+    "n_ubatch": 512,
+    "verbose": true
+  },
+  "image": {
+    "name": "FLUX.1-schnell",
+    "runtime": "diffusers",
+    "format": "GGUF",
+    "path": "D:\\all project\\Projects\\AI projects\\ai assentent\\Local_codex\\models\\image\\flux1-schnell-Q2_K.gguf",
+    "width": 1024,
+    "height": 1024,
+    "steps": 4,
+    "guidance_scale": 0.0
   }
 }

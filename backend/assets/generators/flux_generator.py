@@ -1,229 +1,101 @@
 from pathlib import Path
-import traceback
 
 import torch
-from diffusers import (
-    FluxPipeline,
-    FluxTransformer2DModel,
-    GGUFQuantizationConfig,
-)
+
+from backend.assets.image_model_manager import ImageModelManager
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+class FluxGenerator:
+    """
+    Generates images using the locally loaded FLUX model.
 
-MODEL_PATH = Path(
-    r"D:\all project\Projects\AI projects\ai assentent"
-    r"\Local_codex\models\image\flux1-schnell-Q2_K.gguf"
-)
+    The FLUX model and its disk offload cache are kept alive
+    across multiple image generations.
 
-BASE_MODEL = "black-forest-labs/FLUX.1-schnell"
+    Lifecycle is managed by ImageModelManager:
 
-OUTPUT_DIR = Path("generated/assets")
+        load FLUX
+            ↓
+        generate image 1
+            ↓
+        generate image 2
+            ↓
+        generate image 3
+            ↓
+        unload FLUX
+            ↓
+        delete offload cache
+    """
 
-OUTPUT_FILE = OUTPUT_DIR / "flux_test.png"
+    def __init__(
+        self,
+        model_manager: ImageModelManager,
+        output_dir: str = "generated/assets",
+    ):
+        self.model_manager = model_manager
+        self.output_dir = Path(output_dir)
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print("=" * 70)
-    print("FLUX IMAGE GENERATOR")
-    print("=" * 70)
-
-    # --------------------------------------------------------
-    # Hardware check
-    # --------------------------------------------------------
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available.")
-
-    gpu_name = torch.cuda.get_device_name(0)
-    gpu_memory = (
-        torch.cuda.get_device_properties(0).total_memory
-        / 1024**3
-    )
-
-    print(f"GPU: {gpu_name}")
-    print(f"VRAM: {gpu_memory:.2f} GB")
-    print()
-
-    # --------------------------------------------------------
-    # Check model
-    # --------------------------------------------------------
-
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"FLUX GGUF model not found:\n{MODEL_PATH}"
+        self.output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
-    print(f"Model: {MODEL_PATH}")
-    print()
+    def generate(
+        self,
+        prompt: str,
+        output_name: str,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 4,
+        seed: int = 42,
+    ) -> str:
+        """
+        Generate one image using the already-managed FLUX pipeline.
 
-    # --------------------------------------------------------
-    # Load local FLUX Q2_K transformer
-    # --------------------------------------------------------
+        Important:
+        This method DOES NOT unload FLUX and DOES NOT delete the
+        disk offload cache.
 
-    print("=" * 70)
-    print("LOADING LOCAL FLUX Q2_K TRANSFORMER")
-    print("=" * 70)
+        The cache must remain available when multiple images are
+        generated in the same FLUX session.
+        """
 
-    print("Loading transformer...")
-    print()
+        if not prompt.strip():
+            raise ValueError("Prompt cannot be empty.")
 
-    transformer = FluxTransformer2DModel.from_single_file(
-        str(MODEL_PATH),
-        quantization_config=GGUFQuantizationConfig(
-            compute_dtype=torch.float16
-        ),
-        torch_dtype=torch.float16,
-    )
+        output_path = self.output_dir / output_name
 
-    print()
-    print("Transformer loaded successfully.")
-    print()
+        # Load FLUX only if it is not already loaded.
+        # If the AssetGenerationManager is processing multiple
+        # images, the same pipeline will be reused.
+        pipe = self.model_manager.get_pipeline()
 
-    # --------------------------------------------------------
-    # Build FLUX pipeline
-    # --------------------------------------------------------
-
-    print("=" * 70)
-    print("LOADING FLUX PIPELINE")
-    print("=" * 70)
-
-    print(f"Base model: {BASE_MODEL}")
-    print()
-
-    pipe = FluxPipeline.from_pretrained(
-        BASE_MODEL,
-        transformer=transformer,
-        torch_dtype=torch.float16,
-    )
-
-    print()
-    print("Pipeline loaded successfully.")
-    print()
-
-    # --------------------------------------------------------
-    # Enable low-VRAM CPU offloading
-    # --------------------------------------------------------
-
-    print("=" * 70)
-    print("ENABLING LOW-VRAM MODE")
-    print("=" * 70)
-
-    pipe.enable_model_cpu_offload()
-
-    print("CPU offload enabled.")
-    print()
-
-    # --------------------------------------------------------
-    # Prompt
-    # --------------------------------------------------------
-
-    prompt = (
-        "A futuristic artificial intelligence laboratory, "
-        "clean modern technology, cinematic lighting, "
-        "professional presentation illustration"
-    )
-
-    print("=" * 70)
-    print("STARTING IMAGE GENERATION")
-    print("=" * 70)
-
-    print(f"Prompt: {prompt}")
-    print("Resolution: 512x512")
-    print("Steps: 4")
-    print("Guidance scale: 0.0")
-    print()
-
-    # --------------------------------------------------------
-    # Inference
-    # --------------------------------------------------------
-
-    try:
-
-        print("Creating random generator...")
-
+        # Keep the random generator on CPU.
         generator = torch.Generator(
             device="cpu"
-        ).manual_seed(42)
-
-        print("Starting FLUX inference...")
-        print()
-
-        result = pipe(
-            prompt=prompt,
-            guidance_scale=0.0,
-            num_inference_steps=4,
-            width=512,
-            height=512,
-            max_sequence_length=256,
-            generator=generator,
-        )
+        ).manual_seed(seed)
 
         print()
-        print("FLUX inference completed.")
+        print("Generating image...")
+        print(f"Prompt: {prompt}")
+        print(f"Resolution: {width}x{height}")
+        print(f"Steps: {steps}")
+        print(f"Seed: {seed}")
 
-        # ----------------------------------------------------
-        # Get generated image
-        # ----------------------------------------------------
-
-        if not result.images:
-            raise RuntimeError(
-                "FLUX returned no images."
+        with torch.inference_mode():
+            result = pipe(
+                prompt=prompt,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=0.0,
+                generator=generator,
             )
 
         image = result.images[0]
 
-        print("Image received from pipeline.")
+        image.save(output_path)
 
-        # ----------------------------------------------------
-        # Save image
-        # ----------------------------------------------------
+        print(f"Image saved: {output_path}")
 
-        OUTPUT_DIR.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        image.save(OUTPUT_FILE)
-
-        print()
-        print("=" * 70)
-        print("IMAGE GENERATED SUCCESSFULLY")
-        print("=" * 70)
-        print(f"Output: {OUTPUT_FILE}")
-        print("=" * 70)
-
-    except Exception as e:
-
-        print()
-        print("=" * 70)
-        print("FLUX INFERENCE FAILED")
-        print("=" * 70)
-
-        print(f"Error type: {type(e).__name__}")
-        print(f"Error: {e}")
-
-        print()
-        print("FULL TRACEBACK")
-        print("-" * 70)
-
-        traceback.print_exc()
-
-        print("=" * 70)
-
-        raise
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+        return str(output_path)
