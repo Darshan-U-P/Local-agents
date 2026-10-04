@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Any
 
 from backend.ai.model_manager import ModelManager
 
@@ -71,6 +72,7 @@ class PresentationPlanner:
     def __init__(self):
         self.model_manager = ModelManager()
         self.evidence_validation_results: list[dict] = []
+        self.unsupported_claim_removals: list[dict] = []
 
     # =========================================================
     # CREATE PRESENTATION PLAN
@@ -146,6 +148,18 @@ FACTUAL CLAIM RULES
   citation. Select the supporting fact first.
 - A fact_id is valid only if the cited fact supports the complete meaning
   of the sentence.
+- Every factual key point must be directly expressible from one or more
+  supplied research facts. Before writing it, identify the exact
+  supporting fact or facts.
+- Do not introduce a new problem, limitation, challenge, cause, effect,
+  comparison, capability, trend, or conclusion unless the supplied
+  research facts explicitly establish it.
+- Never infer a general problem or limitation from a future target,
+  roadmap, benchmark, project goal, or development milestone.
+- A fact mentioning a target such as "2,000 logical qubits by 2033" does
+  NOT support claims such as "error correction remains unsolved",
+  "scalability remains unsolved", or "decoherence is the main challenge"
+  unless the research explicitly states those things.
 - Do not add concepts that are not explicitly present in the selected
   fact. Do not infer mechanisms, applications, benefits, limitations,
   performance, causality, or implications.
@@ -159,6 +173,7 @@ FACTUAL CLAIM RULES
 RESEARCH-ONLY GENERATION
 - Supplied research is the factual knowledge boundary; do not add facts
   simply because they are generally true or infer implications.
+- Do not use pretrained knowledge to fill evidence gaps.
 - Do not add scientific explanations, applications, performance claims,
   risks, limitations, or historical context unless explicitly supported.
 - Omit useful-sounding claims that are not supported by research.
@@ -256,6 +271,18 @@ performance, causality, or implications that are not explicitly present
 in the selected fact. Prefer a narrower claim with strong evidence over
 a broader claim with weak evidence. If no research fact supports a
 useful claim, omit it.
+Every factual key point must be directly expressible from supplied facts;
+identify the exact supporting fact or facts before writing it. Do not
+introduce a new problem, limitation, challenge, cause, effect, comparison,
+capability, trend, or conclusion unless the supplied facts explicitly
+establish it. Do not infer a general problem or limitation from a future
+target, roadmap, benchmark, project goal, or development milestone.
+Specifically, a fact mentioning "2,000 logical qubits by 2033" does NOT
+support "error correction remains unsolved", "scalability remains
+unsolved", or "decoherence is the main challenge" unless the research
+explicitly states those things. Do not use pretrained knowledge to fill
+evidence gaps. Keep claims concise and omit unsupported claims rather
+than filling a slide with general knowledge.
 
 When a visual directly depends on a research source,
 include the exact source_id in the asset's "source_ids" list.
@@ -463,9 +490,81 @@ OUTPUT LENGTH RULES:
             plan=plan,
             research_context=research_context,
         )
+        self._remove_unsupported_key_points(plan)
         self._validate_plan(plan)
 
         return plan
+
+    def _remove_unsupported_key_points(
+        self,
+        plan: dict,
+    ) -> list[dict]:
+        """Remove only key points marked UNSUPPORTED by evidence validation."""
+        evidence_by_position = {
+            (result.get("slide_index"), result.get("point_index")): result
+            for result in self.evidence_validation_results
+            if isinstance(result, dict)
+        }
+        removals: list[dict] = []
+        slides = plan.get("slides", [])
+        if not isinstance(slides, list):
+            self.unsupported_claim_removals = removals
+            return removals
+
+        for slide_index, slide in enumerate(slides, start=1):
+            if not isinstance(slide, dict):
+                continue
+
+            key_points = slide.get("key_points", [])
+            if not isinstance(key_points, list):
+                continue
+
+            retained_key_points = []
+            for point_index, point in enumerate(key_points, start=1):
+                evidence_result = evidence_by_position.get(
+                    (slide_index, point_index)
+                )
+                if (
+                    isinstance(evidence_result, dict)
+                    and evidence_result.get("status") == "UNSUPPORTED"
+                ):
+                    original_citations = evidence_result.get(
+                        "original_citations",
+                        point.get("sources", [])
+                        if isinstance(point, dict)
+                        else [],
+                    )
+                    if not isinstance(original_citations, list):
+                        original_citations = []
+
+                    removal = {
+                        "slide_number": slide_index,
+                        "point_number": point_index,
+                        "claim": (
+                            point.get("text", "")
+                            if isinstance(point, dict)
+                            else ""
+                        ),
+                        "original_citations": list(original_citations),
+                        "reason": "UNSUPPORTED",
+                    }
+                    removals.append(removal)
+                    print(
+                        "[Planner] Removed unsupported key point "
+                        f"on slide {slide_index}, point {point_index}: "
+                        f"{removal['claim']} "
+                        f"(original citations: "
+                        f"{removal['original_citations']}; "
+                        "reason: UNSUPPORTED)"
+                    )
+                    continue
+
+                retained_key_points.append(point)
+
+            slide["key_points"] = retained_key_points
+
+        self.unsupported_claim_removals = removals
+        return removals
 
     def _validate_citations(
         self,
@@ -593,14 +692,15 @@ OUTPUT LENGTH RULES:
         research_context: dict | None,
     ) -> list[dict]:
         """
-        Classify how well cited research facts lexically support claims.
+        Classify claim support from fact text and rank repair candidates.
 
-        Claim-term coverage determines support status. Results are
-        exposed on ``evidence_validation_results``; citations are
-        repaired only when a better matching known fact is found.
+        Fact text determines support status. Supplied concepts add a
+        diagnostic overlap score and a secondary candidate-ranking signal.
+        Results are exposed on ``evidence_validation_results``; citations
+        are repaired only after the existing checks and final revalidation.
         """
 
-        evidence_by_fact_id: dict[str, str] = {}
+        evidence_by_fact_id: dict[str, dict[str, Any]] = {}
         if not isinstance(research_context, dict):
             self.evidence_validation_results = []
             return []
@@ -621,12 +721,20 @@ OUTPUT LENGTH RULES:
 
                     fact_id = fact.get("fact_id")
                     fact_text = fact.get("text")
+                    concepts = fact.get("concepts", [])
                     if (
                         isinstance(fact_id, str)
                         and fact_id.strip()
                         and isinstance(fact_text, str)
                     ):
-                        evidence_by_fact_id[fact_id] = fact_text
+                        evidence_by_fact_id[fact_id] = {
+                            "fact_text": fact_text,
+                            "concepts": (
+                                concepts
+                                if isinstance(concepts, list)
+                                else []
+                            ),
+                        }
 
         results: list[dict] = []
         slides = plan.get("slides", [])
@@ -665,18 +773,20 @@ OUTPUT LENGTH RULES:
                 rejected_candidates: list[dict] = []
                 repaired_citations: list[str] = []
                 for fact_id in citations:
+                    current_evidence = evidence_by_fact_id.get(
+                        fact_id if isinstance(fact_id, str) else "",
+                        {},
+                    )
                     current_fact = {
                         "fact_id": fact_id,
-                        "fact_text": evidence_by_fact_id.get(
-                            fact_id if isinstance(fact_id, str) else "",
-                            "",
-                        ),
+                        **current_evidence,
                     }
                     current_evaluation = self._evaluate_claim_against_fact(
                         claim=claim,
                         fact=current_fact,
                     )
                     best_candidate: dict | None = None
+                    best_candidate_rank: tuple[float, float] | None = None
                     current_score = (
                         0.75
                         * current_evaluation["claim_term_coverage"]
@@ -684,11 +794,14 @@ OUTPUT LENGTH RULES:
                         * current_evaluation["term_similarity"]
                     )
 
-                    for candidate_fact_id, candidate_fact_text in (
+                    for candidate_fact_id, candidate_evidence in (
                         evidence_by_fact_id.items()
                     ):
                         if candidate_fact_id == fact_id:
                             continue
+                        candidate_fact_text = candidate_evidence[
+                            "fact_text"
+                        ]
                         if not candidate_fact_text:
                             rejected_candidates.append(
                                 {
@@ -701,7 +814,7 @@ OUTPUT LENGTH RULES:
 
                         candidate = {
                             "fact_id": candidate_fact_id,
-                            "fact_text": candidate_fact_text,
+                            **candidate_evidence,
                         }
                         candidate_evaluation = self._evaluate_claim_against_fact(
                             claim=claim,
@@ -717,6 +830,11 @@ OUTPUT LENGTH RULES:
                                     "reason": "below_coverage",
                                     "candidate_fact_id": candidate_fact_id,
                                     "candidate_coverage": candidate_coverage,
+                                    "candidate_concept_overlap_score": (
+                                        candidate_evaluation[
+                                            "concept_overlap_score"
+                                        ]
+                                    ),
                                 }
                             )
                             continue
@@ -735,6 +853,11 @@ OUTPUT LENGTH RULES:
                                     "reason": "below_score",
                                     "candidate_fact_id": candidate_fact_id,
                                     "candidate_score": candidate_score,
+                                    "candidate_concept_overlap_score": (
+                                        candidate_evaluation[
+                                            "concept_overlap_score"
+                                        ]
+                                    ),
                                 }
                             )
                             continue
@@ -748,6 +871,11 @@ OUTPUT LENGTH RULES:
                                     "candidate_fact_id": candidate_fact_id,
                                     "candidate_score": candidate_score,
                                     "current_score": current_score,
+                                    "candidate_concept_overlap_score": (
+                                        candidate_evaluation[
+                                            "concept_overlap_score"
+                                        ]
+                                    ),
                                 }
                             )
                             continue
@@ -760,6 +888,11 @@ OUTPUT LENGTH RULES:
                                     "rejected": True,
                                     "reason": "missing_required_anchor",
                                     "candidate_fact_id": candidate_fact_id,
+                                    "candidate_concept_overlap_score": (
+                                        candidate_evaluation[
+                                            "concept_overlap_score"
+                                        ]
+                                    ),
                                 }
                             )
                             continue
@@ -775,12 +908,27 @@ OUTPUT LENGTH RULES:
                                     "reason": "not_supported",
                                     "candidate_fact_id": candidate_fact_id,
                                     "candidate_status": revalidated["status"],
+                                    "candidate_concept_overlap_score": (
+                                        revalidated[
+                                            "concept_overlap_score"
+                                        ]
+                                    ),
                                 }
                             )
                             continue
 
-                        best_candidate = candidate
-                        current_score = candidate_score
+                        candidate_rank = self._repair_candidate_rank(
+                            candidate_score,
+                            candidate_evaluation[
+                                "concept_overlap_score"
+                            ],
+                        )
+                        if (
+                            best_candidate_rank is None
+                            or candidate_rank > best_candidate_rank
+                        ):
+                            best_candidate = candidate
+                            best_candidate_rank = candidate_rank
 
                     replacement_id = (
                         best_candidate["fact_id"]
@@ -801,15 +949,17 @@ OUTPUT LENGTH RULES:
 
                 fact_results: list[dict] = []
                 for fact_id in citations:
-                    fact_text = evidence_by_fact_id.get(
+                    evidence = evidence_by_fact_id.get(
                         fact_id if isinstance(fact_id, str) else "",
-                        "",
+                        {},
                     )
+                    fact_text = evidence.get("fact_text", "")
                     evaluation = self._evaluate_claim_against_fact(
                         claim=claim,
                         fact={
                             "fact_id": fact_id,
                             "fact_text": fact_text,
+                            **evidence,
                         },
                     )
                     fact_results.append(
@@ -1068,12 +1218,70 @@ OUTPUT LENGTH RULES:
             claim=claim,
             evidence=fact_text,
         )
+        concepts = fact.get("concepts", [])
+        if not isinstance(concepts, list):
+            concepts = []
+
         return {
             "status": status,
             "claim_term_coverage": claim_term_coverage,
             "term_similarity": term_similarity,
             "matched_terms": matched_terms,
+            "concept_overlap_score": self._concept_overlap_score(
+                claim,
+                concepts,
+            ),
         }
+
+    @staticmethod
+    def _concept_overlap_score(
+        claim: str,
+        concepts: list[Any],
+    ) -> float:
+        """Measure claim-token coverage by supplied concept text only."""
+        ignored_terms = {
+            "a", "an", "and", "are", "as", "at", "be", "been",
+            "being", "by", "can", "could", "did", "do", "does",
+            "for", "from", "had", "has", "have", "in", "into",
+            "is", "it", "its", "may", "might", "must", "of", "on",
+            "or", "should", "that", "the", "their", "them", "they",
+            "this", "those", "through", "to", "was", "were", "will",
+            "with", "would",
+        }
+
+        def meaningful_tokens(text: str) -> set[str]:
+            return {
+                token
+                for token in re.findall(
+                    r"[a-z0-9]+",
+                    text.lower().replace("-", " "),
+                )
+                if len(token) > 1 and token not in ignored_terms
+            }
+
+        claim_tokens = meaningful_tokens(claim)
+        if not claim_tokens:
+            return 0.0
+
+        concept_tokens: set[str] = set()
+        for concept in concepts:
+            if isinstance(concept, str):
+                concept_tokens.update(
+                    meaningful_tokens(concept)
+                )
+
+        return len(claim_tokens & concept_tokens) / len(claim_tokens)
+
+    @staticmethod
+    def _repair_candidate_rank(
+        lexical_score: float,
+        concept_overlap_score: float,
+    ) -> tuple[float, float]:
+        """Use concept overlap as a small ranking tie-break signal."""
+        return (
+            lexical_score + 0.05 * concept_overlap_score,
+            lexical_score,
+        )
 
     @staticmethod
     def _evidence_rank(
