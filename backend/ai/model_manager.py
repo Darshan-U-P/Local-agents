@@ -20,6 +20,18 @@ class ModelManager:
         GPU / CPU resources released
     """
 
+    # =========================================================
+    # DEFAULT SETTINGS
+    # =========================================================
+
+    # Qwen3-4B supports a much larger context, but 8192 is a
+    # safer runtime target for the current 4 GB VRAM system.
+    DEFAULT_CONTEXT_SIZE = 8192
+
+    # =========================================================
+    # INITIALIZATION
+    # =========================================================
+
     def __init__(
         self,
         config_path: str = "config/models.json",
@@ -88,6 +100,29 @@ class ModelManager:
         )
 
         # -----------------------------------------------------
+        # Context configuration
+        # -----------------------------------------------------
+
+        context_size = config.get(
+            "context_size",
+            self.DEFAULT_CONTEXT_SIZE,
+        )
+
+        # Make sure the configured value is valid.
+        if context_size < 4096:
+            print(
+                "Warning: configured context size is "
+                f"{context_size}. "
+                "Using minimum safe context size of 4096."
+            )
+
+            context_size = 4096
+
+        print(
+            f"Context size: {context_size}"
+        )
+
+        # -----------------------------------------------------
         # GPU configuration
         # -----------------------------------------------------
 
@@ -116,21 +151,40 @@ class ModelManager:
         self.model = Llama(
             model_path=str(model_path),
 
+            # -------------------------------------------------
             # Context window
-            n_ctx=config["context_size"],
+            # -------------------------------------------------
+            #
+            # 8192 is used instead of the model's full
+            # 40960-token training context because this system
+            # currently has only 4 GB VRAM.
+            #
+            n_ctx=context_size,
 
+            # -------------------------------------------------
             # CUDA GPU offloading
+            # -------------------------------------------------
+            #
             # -1 = offload all possible layers
+            #
             n_gpu_layers=n_gpu_layers,
 
-            # Keep KV cache operations on GPU
-            # when supported.
+            # -------------------------------------------------
+            # KV cache
+            # -------------------------------------------------
+
             offload_kqv=True,
 
+            # -------------------------------------------------
             # Flash Attention
+            # -------------------------------------------------
+
             flash_attn=flash_attention,
 
+            # -------------------------------------------------
             # Batch sizes
+            # -------------------------------------------------
+
             n_batch=config.get(
                 "n_batch",
                 512,
@@ -141,7 +195,10 @@ class ModelManager:
                 512,
             ),
 
+            # -------------------------------------------------
             # CPU threads
+            # -------------------------------------------------
+
             n_threads=config.get(
                 "n_threads"
             ),
@@ -150,7 +207,10 @@ class ModelManager:
                 "n_threads_batch"
             ),
 
+            # -------------------------------------------------
             # llama.cpp logging
+            # -------------------------------------------------
+
             verbose=config.get(
                 "verbose",
                 False,
@@ -160,6 +220,9 @@ class ModelManager:
         print()
         print("Chat model loaded.")
         print("CUDA GPU offloading enabled.")
+        print(
+            f"Runtime context: {context_size} tokens"
+        )
         print("================================")
 
         return self.model
@@ -204,6 +267,10 @@ class ModelManager:
 
         print()
         print("Generating with Qwen...")
+
+        # -----------------------------------------------------
+        # Generate
+        # -----------------------------------------------------
 
         response = self.model.create_chat_completion(
             messages=[

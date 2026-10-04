@@ -1,66 +1,442 @@
-from pathlib import Path
+﻿from pathlib import Path
+import os
+import subprocess
+import time
 
 from backend.assets.asset_router import AssetRouter
 from backend.generation.manifest import GenerationManifest
 from backend.generation.generation_session import GenerationSession
 
 
+class Flux2KleinManager:
+    """
+    Local FLUX.2 Klein 4B image generator.
+
+    Uses the already validated stable-diffusion.cpp CUDA executable
+    instead of loading FLUX through Diffusers/Python.
+
+    Pipeline:
+
+        Python
+           â†“
+        sd-cli.exe
+           â†“
+        FLUX.2 Klein 4B Q4_0
+           +
+        Qwen3-4B
+           +
+        FLUX.2 VAE
+           â†“
+        PNG
+    """
+
+    def __init__(self, output_dir: Path):
+        self.output_dir = Path(output_dir)
+
+        # ---------------------------------------------------------
+        # Project paths
+        # ---------------------------------------------------------
+
+        self.project_root = Path(
+            r"D:\all project\Projects\AI projects\ai assentent\Local-agents"
+        )
+
+        self.sd_cli = (
+            self.project_root
+            / "sd-master-3f8527a-bin-win-cuda12-x64"
+            / "sd-cli.exe"
+        )
+
+        self.image_model_dir = Path(
+            r"D:\all project\Projects\AI projects\ai assentent\Local_codex\models\image"
+        )
+
+        self.chat_model_dir = Path(
+            r"D:\all project\Projects\AI projects\ai assentent\Local_codex\models\chat\qwen3-4b"
+        )
+
+        # ---------------------------------------------------------
+        # Model paths
+        # ---------------------------------------------------------
+
+        self.diffusion_model = (
+            self.image_model_dir
+            / "flux-2-klein-4b-Q4_0.gguf"
+        )
+
+        self.qwen_model = (
+            self.chat_model_dir
+            / "Qwen3-4B-Q4_K_M.gguf"
+        )
+
+        self.vae_model = (
+            self.image_model_dir
+            / "full_encoder_small_decoder.safetensors"
+        )
+
+        # ---------------------------------------------------------
+        # Generation configuration
+        # ---------------------------------------------------------
+
+        self.width = int(os.getenv("FLUX2_WIDTH", "512"))
+        self.height = int(os.getenv("FLUX2_HEIGHT", "512"))
+
+        self.steps = int(os.getenv("FLUX2_STEPS", "4"))
+        self.cfg_scale = float(os.getenv("FLUX2_CFG", "1.0"))
+        self.seed = int(os.getenv("FLUX2_SEED", "42"))
+
+        self.sampling_method = "euler"
+
+        self.loaded = False
+
+        self.output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+    # =============================================================
+    # VALIDATION
+    # =============================================================
+
+    def _validate_files(self):
+        """Validate all required FLUX.2 runtime files."""
+
+        required = {
+            "sd-cli.exe": self.sd_cli,
+            "FLUX.2 Klein Q4_0": self.diffusion_model,
+            "Qwen3-4B": self.qwen_model,
+            "FLUX.2 VAE": self.vae_model,
+        }
+
+        missing = []
+
+        for name, path in required.items():
+            if not path.exists():
+                missing.append(
+                    f"{name}: {path}"
+                )
+
+        if missing:
+            raise FileNotFoundError(
+                "Missing FLUX.2 runtime files:\n"
+                + "\n".join(missing)
+            )
+
+    # =============================================================
+    # MODEL LIFECYCLE
+    # =============================================================
+
+    def load(self):
+        """
+        Validate the FLUX.2 runtime.
+
+        Unlike Diffusers, stable-diffusion.cpp does not require us
+        to explicitly load the model into Python memory.
+        """
+
+        if self.loaded:
+            return
+
+        print()
+        print("================================")
+        print("FLUX.2 KLEIN RUNTIME")
+        print("================================")
+
+        self._validate_files()
+
+        print()
+        print("sd-cli:")
+        print(f"  {self.sd_cli}")
+
+        print()
+        print("FLUX.2:")
+        print(f"  {self.diffusion_model}")
+
+        print()
+        print("Qwen3-4B:")
+        print(f"  {self.qwen_model}")
+
+        print()
+        print("VAE:")
+        print(f"  {self.vae_model}")
+
+        self.loaded = True
+
+        print()
+        print("FLUX.2 Klein runtime ready.")
+
+    def unload(self):
+        """
+        Release the logical runtime state.
+
+        sd-cli is launched per generation, so there is no persistent
+        Python-side model object to delete.
+        """
+
+        self.loaded = False
+
+        print(
+            "FLUX.2 Klein runtime released."
+        )
+
+    def is_loaded(self):
+        return self.loaded
+
+    # =============================================================
+    # GENERATION
+    # =============================================================
+
+    def generate(
+        self,
+        prompt: str,
+        output_path: Path,
+        seed: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        steps: int | None = None,
+    ):
+        """
+        Generate one image using FLUX.2 Klein through sd-cli.
+        """
+
+        if not self.loaded:
+            self.load()
+
+        output_path = Path(output_path).resolve()
+
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        actual_seed = (
+            self.seed
+            if seed is None
+            else seed
+        )
+
+        actual_width = (
+            self.width
+            if width is None
+            else width
+        )
+
+        actual_height = (
+            self.height
+            if height is None
+            else height
+        )
+
+        actual_steps = (
+            self.steps
+            if steps is None
+            else steps
+        )
+
+        command = [
+            str(self.sd_cli),
+
+            "--diffusion-model",
+            str(self.diffusion_model),
+
+            "--vae",
+            str(self.vae_model),
+
+            "--llm",
+            str(self.qwen_model),
+
+            "--backend",
+            "cuda",
+
+            "--offload-to-cpu",
+
+            "--diffusion-fa",
+
+            "--cfg-scale",
+            str(self.cfg_scale),
+
+            "--sampling-method",
+            self.sampling_method,
+
+            "--steps",
+            str(actual_steps),
+
+            "-W",
+            str(actual_width),
+
+            "-H",
+            str(actual_height),
+
+            "--seed",
+            str(actual_seed),
+
+            "-p",
+            prompt,
+
+            "-o",
+            str(output_path),
+
+            "-v",
+        ]
+
+        print()
+        print("--------------------------------")
+        print("FLUX.2 GENERATION")
+        print("--------------------------------")
+
+        print(
+            f"Resolution: "
+            f"{actual_width}x{actual_height}"
+        )
+
+        print(
+            f"Steps: {actual_steps}"
+        )
+
+        print(
+            f"Seed: {actual_seed}"
+        )
+
+        print(
+            f"Output: {output_path}"
+        )
+
+        print()
+        print("Prompt:")
+        print(prompt)
+
+        print()
+        print("Starting sd-cli...")
+        print("--------------------------------")
+
+        start_time = time.perf_counter()
+
+        # ---------------------------------------------------------
+        # Start stable-diffusion.cpp
+        # ---------------------------------------------------------
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(self.sd_cli.parent),
+        )
+
+        # ---------------------------------------------------------
+        # Stream output to terminal
+        # ---------------------------------------------------------
+
+        if process.stdout is not None:
+
+            for line in process.stdout:
+                print(
+                    line.rstrip()
+                )
+
+        return_code = process.wait()
+
+        elapsed = (
+            time.perf_counter()
+            - start_time
+        )
+
+        print()
+        print(
+            f"FLUX.2 process finished "
+            f"in {elapsed:.2f}s"
+        )
+
+        # ---------------------------------------------------------
+        # Validate process result
+        # ---------------------------------------------------------
+
+        if return_code != 0:
+
+            raise RuntimeError(
+                "FLUX.2 sd-cli failed "
+                f"with exit code {return_code}"
+            )
+
+        # ---------------------------------------------------------
+        # Validate output
+        # ---------------------------------------------------------
+
+        if not output_path.exists():
+
+            raise RuntimeError(
+                "FLUX.2 completed without "
+                f"creating the expected output:\n"
+                f"{output_path}"
+            )
+
+        if output_path.stat().st_size == 0:
+
+            raise RuntimeError(
+                "FLUX.2 created an empty output file:\n"
+                f"{output_path}"
+            )
+
+        print()
+        print(
+            f"FLUX.2 image generated successfully:"
+        )
+        print(output_path)
+
+        return str(output_path)
+
+
 class AssetGenerationManager:
     """
     Controls asset generation for a presentation.
 
-    Model lifecycle:
+    Current image pipeline:
 
-        Qwen
-          ↓
-        UNLOAD
-          ↓
         AssetGenerationManager
-          ↓
-        Load FLUX only when needed
-          ↓
-        Generate image assets
-          ↓
-        UNLOAD FLUX
-          ↓
-        Continue with other asset generators
+                â†“
+        AssetPromptBuilder
+                â†“
+        Flux2KleinManager
+                â†“
+        stable-diffusion.cpp
+                â†“
+        FLUX.2 Klein 4B
+                â†“
+        PNG
 
-    Image-like assets:
-        image
-        illustration
-        photo
-
-    Current generators:
-
-        image / illustration / photo
-            ↓
-          FLUX
+    Other asset types remain separate:
 
         icon
-            ↓
+            â†“
         future vector generator
 
         diagram
-            ↓
+            â†“
         future diagram generator
 
         chart
-            ↓
+            â†“
         future deterministic chart generator
 
-    Generation is resumable.
-
-    Already completed assets are skipped.
+        none
+            â†“
+        completed immediately
     """
 
-    # ---------------------------------------------------------
-    # Asset type groups
-    # ---------------------------------------------------------
+    # =========================================================
+    # ASSET TYPE GROUPS
+    # =========================================================
 
     IMAGE_ASSET_TYPES = {
         "image",
         "illustration",
         "photo",
+    }
+
+    NONE_ASSET_TYPES = {
+        "none",
     }
 
     FUTURE_ASSET_TYPES = {
@@ -84,7 +460,8 @@ class AssetGenerationManager:
         )
 
         self.assets_dir = (
-            self.session_dir / "assets"
+            self.session_dir
+            / "assets"
         )
 
         self.assets_dir.mkdir(
@@ -98,10 +475,18 @@ class AssetGenerationManager:
             )
         )
 
+        # Keep AssetRouter because it owns the
+        # AssetPromptBuilder used by the existing
+        # presentation asset system.
         self.router = AssetRouter(
             output_dir=str(
                 self.assets_dir
             )
+        )
+
+        # New FLUX.2 backend.
+        self.flux2 = Flux2KleinManager(
+            output_dir=self.assets_dir
         )
 
     # =========================================================
@@ -112,24 +497,21 @@ class AssetGenerationManager:
         """
         Generate every pending asset in the manifest.
 
-        Image-like assets are processed as one batch:
+        Image assets are processed as a batch.
 
-            Load FLUX
-                ↓
-            image 1
-                ↓
-            image 2
-                ↓
-            illustration 1
-                ↓
-            photo 1
-                ↓
-            Unload FLUX
+        FLUX.2 runtime validation:
+            â†“
+        image 1
+            â†“
+        image 2
+            â†“
+        illustration
+            â†“
+        photo
+            â†“
+        release runtime
 
-        This avoids repeatedly loading the FLUX model.
-
-        FLUX is also guaranteed to be unloaded if
-        generation fails.
+        No Python-side 4B model is kept in VRAM between assets.
         """
 
         manifest = self.manifest.load_assets()
@@ -160,25 +542,25 @@ class AssetGenerationManager:
 
         try:
 
-            # =================================================
-            # IMAGE-LIKE ASSETS
-            # =================================================
+            # -------------------------------------------------
+            # IMAGE ASSETS
+            # -------------------------------------------------
 
             self._generate_image_assets(
                 assets
             )
 
-            # =================================================
-            # FUTURE ASSET TYPES
-            # =================================================
+            # -------------------------------------------------
+            # NON-IMAGE ASSETS
+            # -------------------------------------------------
 
             self._process_non_image_assets(
                 assets
             )
 
-            # =================================================
+            # -------------------------------------------------
             # FINAL STATUS
-            # =================================================
+            # -------------------------------------------------
 
             final_manifest = (
                 self.manifest.load_assets()
@@ -213,7 +595,8 @@ class AssetGenerationManager:
                 print()
                 print("================================")
                 print(
-                    "ASSET GENERATION PARTIALLY COMPLETE"
+                    "ASSET GENERATION "
+                    "PARTIALLY COMPLETE"
                 )
                 print("================================")
 
@@ -222,12 +605,6 @@ class AssetGenerationManager:
                 )
 
         except Exception as exc:
-
-            # -------------------------------------------------
-            # Safety:
-            #
-            # FLUX must never remain loaded if something fails.
-            # -------------------------------------------------
 
             self._unload_flux()
 
@@ -256,28 +633,20 @@ class AssetGenerationManager:
     ):
         """
         Generate all pending image-like assets.
-
-        Image-like types:
-
-            image
-            illustration
-            photo
-
-        FLUX is loaded once for the complete batch and
-        unloaded after the batch finishes.
         """
 
         image_assets = [
             asset
             for asset in assets
-            if asset.get("type", "").strip().lower()
+            if asset.get(
+                "type",
+                "",
+            ).strip().lower()
             in self.IMAGE_ASSET_TYPES
-            and asset.get("status") != "completed"
+            and asset.get(
+                "status"
+            ) != "completed"
         ]
-
-        # -----------------------------------------------------
-        # Nothing to generate
-        # -----------------------------------------------------
 
         if not image_assets:
 
@@ -299,20 +668,20 @@ class AssetGenerationManager:
         )
 
         # -----------------------------------------------------
-        # Load FLUX
+        # Validate FLUX.2 runtime once
         # -----------------------------------------------------
 
         print()
         print(
-            "Loading FLUX for image generation..."
+            "Preparing FLUX.2 Klein..."
         )
 
-        self.router.image_model_manager.load()
+        self.flux2.load()
 
         try:
 
             # -------------------------------------------------
-            # Generate images sequentially
+            # Generate sequentially
             # -------------------------------------------------
 
             for asset in image_assets:
@@ -323,12 +692,6 @@ class AssetGenerationManager:
 
         finally:
 
-            # -------------------------------------------------
-            # IMPORTANT:
-            #
-            # Always unload FLUX after the image batch.
-            # -------------------------------------------------
-
             print()
             print(
                 "Image generation batch finished."
@@ -337,7 +700,7 @@ class AssetGenerationManager:
             self._unload_flux()
 
             print(
-                "FLUX has been unloaded."
+                "FLUX.2 Klein runtime released."
             )
 
     # =========================================================
@@ -351,40 +714,70 @@ class AssetGenerationManager:
         """
         Process asset types that do not currently require FLUX.
 
-        Currently:
+        none
+            -> completed
 
-            icon
-                -> pending
+        icon
+            -> pending
 
-            diagram
-                -> pending
+        diagram
+            -> pending
 
-            chart
-                -> pending
-
-        Their specialized generators will be connected later.
-
-        Image-like assets are skipped because they were already
-        processed by _generate_image_assets().
+        chart
+            -> pending
         """
 
         for asset in assets:
 
             asset_type = (
-                asset.get("type", "")
+                asset.get(
+                    "type",
+                    "",
+                )
                 .strip()
                 .lower()
             )
 
             # -------------------------------------------------
-            # Image-like assets were already processed.
+            # Image assets already processed
             # -------------------------------------------------
 
             if asset_type in self.IMAGE_ASSET_TYPES:
                 continue
 
             # -------------------------------------------------
-            # Already completed.
+            # NONE
+            # -------------------------------------------------
+
+            if asset_type in self.NONE_ASSET_TYPES:
+
+                if asset.get(
+                    "status",
+                    "pending",
+                ) != "completed":
+
+                    self.manifest.update_asset(
+                        asset["id"],
+                        status="completed",
+                        source="none",
+                        path=None,
+                        visual_spec=asset.get(
+                            "visual_spec"
+                        ),
+                        error=None,
+                    )
+
+                    print()
+                    print(
+                        "[SKIPPED] No visual "
+                        f"asset required: "
+                        f"{asset['id']}"
+                    )
+
+                continue
+
+            # -------------------------------------------------
+            # Already completed
             # -------------------------------------------------
 
             if asset.get(
@@ -395,7 +788,7 @@ class AssetGenerationManager:
                 continue
 
             # -------------------------------------------------
-            # Process icon / diagram / chart.
+            # Future generators
             # -------------------------------------------------
 
             self.generate_asset(
@@ -412,12 +805,6 @@ class AssetGenerationManager:
     ):
         """
         Generate one asset.
-
-        If generation fails, the asset is marked as failed
-        and the exception is re-raised.
-
-        Image-like assets should normally be generated while
-        FLUX is already loaded by _generate_image_assets().
         """
 
         asset_id = asset["id"]
@@ -467,7 +854,29 @@ class AssetGenerationManager:
         print("--------------------------------")
 
         # -----------------------------------------------------
-        # MARK AS GENERATING
+        # NONE
+        # -----------------------------------------------------
+
+        if asset_type in self.NONE_ASSET_TYPES:
+
+            self.manifest.update_asset(
+                asset_id,
+                status="completed",
+                source="none",
+                path=None,
+                visual_spec=visual_spec,
+                error=None,
+            )
+
+            print(
+                f"[SKIPPED] No visual "
+                f"asset required: {asset_id}"
+            )
+
+            return None
+
+        # -----------------------------------------------------
+        # MARK GENERATING
         # -----------------------------------------------------
 
         self.manifest.update_asset(
@@ -478,9 +887,9 @@ class AssetGenerationManager:
 
         try:
 
-            # =================================================
+            # -------------------------------------------------
             # IMAGE / ILLUSTRATION / PHOTO
-            # =================================================
+            # -------------------------------------------------
 
             if asset_type in self.IMAGE_ASSET_TYPES:
 
@@ -488,9 +897,9 @@ class AssetGenerationManager:
                     asset
                 )
 
-            # =================================================
+            # -------------------------------------------------
             # ICON
-            # =================================================
+            # -------------------------------------------------
 
             if asset_type == "icon":
 
@@ -498,9 +907,9 @@ class AssetGenerationManager:
                     asset
                 )
 
-            # =================================================
+            # -------------------------------------------------
             # DIAGRAM
-            # =================================================
+            # -------------------------------------------------
 
             if asset_type == "diagram":
 
@@ -508,9 +917,9 @@ class AssetGenerationManager:
                     asset
                 )
 
-            # =================================================
+            # -------------------------------------------------
             # CHART
-            # =================================================
+            # -------------------------------------------------
 
             if asset_type == "chart":
 
@@ -518,20 +927,12 @@ class AssetGenerationManager:
                     asset
                 )
 
-            # =================================================
-            # UNKNOWN TYPE
-            # =================================================
-
             raise ValueError(
                 f"Unsupported asset type: "
                 f"{asset_type}"
             )
 
         except Exception as exc:
-
-            # -------------------------------------------------
-            # Record failure
-            # -------------------------------------------------
 
             self.manifest.update_asset(
                 asset_id,
@@ -559,17 +960,17 @@ class AssetGenerationManager:
         asset: dict,
     ):
         """
-        Generate one image-like asset using FLUX.
+        Generate image-like asset using FLUX.2 Klein.
 
-        The structured visual_spec is passed to AssetRouter.
-
-        AssetRouter / AssetPromptBuilder then converts:
-
-            description
-            +
-            visual_spec
-
-        into the detailed FLUX prompt.
+        Description + visual_spec
+            â†“
+        AssetPromptBuilder
+            â†“
+        FLUX.2 prompt
+            â†“
+        stable-diffusion.cpp
+            â†“
+        PNG
         """
 
         asset_id = asset["id"]
@@ -589,26 +990,7 @@ class AssetGenerationManager:
         )
 
         # -----------------------------------------------------
-        # Make sure FLUX is actually available.
-        #
-        # This protects against direct calls to generate_asset()
-        # outside generate_all().
-        # -----------------------------------------------------
-
-        if not self.router.image_model_manager.is_loaded():
-
-            print(
-                "FLUX is not loaded. "
-                "Loading it now..."
-            )
-
-            self.router.image_model_manager.load()
-
-        # -----------------------------------------------------
-        # Build the exact prompt that AssetRouter will use.
-        #
-        # This lets us preserve the actual prompt inside
-        # asset_manifest.json for reproducibility/debugging.
+        # Build prompt using existing AssetPromptBuilder
         # -----------------------------------------------------
 
         prompt = self._build_asset_prompt(
@@ -618,31 +1000,22 @@ class AssetGenerationManager:
         )
 
         # -----------------------------------------------------
-        # Generate image
+        # Output filename
         # -----------------------------------------------------
 
         output_path = (
-            self.router.generate_asset(
-                asset_type=asset_type,
-                description=description,
-                asset_id=asset_id,
-                visual_spec=visual_spec,
-            )
+            self.assets_dir
+            / f"{asset_id}.png"
         )
 
-        if not output_path:
-
-            raise RuntimeError(
-                f"FLUX did not return an output path "
-                f"for {asset_id}"
-            )
-
         # -----------------------------------------------------
-        # Read generation configuration
+        # Generate using FLUX.2
         # -----------------------------------------------------
 
-        image_config = (
-            self.router.config["image"]
+        output_path = self.flux2.generate(
+            prompt=prompt,
+            output_path=output_path,
+            seed=42,
         )
 
         # -----------------------------------------------------
@@ -654,40 +1027,25 @@ class AssetGenerationManager:
 
             status="completed",
 
-            source="flux",
+            source="flux2-klein",
 
-            model=image_config.get(
-                "name",
-                "FLUX.1-schnell",
+            model=(
+                "flux-2-klein-4b-Q4_0.gguf"
             ),
 
-            runtime=image_config.get(
-                "runtime",
-                "diffusers",
-            ),
+            runtime="stable-diffusion.cpp",
 
-            # Store the actual detailed prompt.
             prompt=prompt,
 
-            # Preserve the structured visual specification.
             visual_spec=visual_spec,
 
             seed=42,
 
-            width=image_config.get(
-                "width",
-                1024,
-            ),
+            width=self.flux2.width,
 
-            height=image_config.get(
-                "height",
-                1024,
-            ),
+            height=self.flux2.height,
 
-            steps=image_config.get(
-                "steps",
-                4,
-            ),
+            steps=self.flux2.steps,
 
             path=output_path,
 
@@ -716,18 +1074,9 @@ class AssetGenerationManager:
         visual_spec: dict | None,
     ) -> str:
         """
-        Build the detailed generator prompt using the same
-        AssetPromptBuilder used by AssetRouter.
-
-        This is used only so the exact prompt can be stored
-        in asset_manifest.json.
-
-        The actual generation is still performed by AssetRouter.
+        Build the exact prompt using the existing
+        AssetPromptBuilder from AssetRouter.
         """
-
-        # -----------------------------------------------------
-        # Use the router's prompt builder when available.
-        # -----------------------------------------------------
 
         prompt_builder = getattr(
             self.router,
@@ -737,16 +1086,7 @@ class AssetGenerationManager:
 
         if prompt_builder is None:
 
-            # -------------------------------------------------
-            # Fallback for compatibility with an older router.
-            # -------------------------------------------------
-
             return description
-
-        # -----------------------------------------------------
-        # Build the same structured asset object expected by
-        # AssetPromptBuilder.
-        # -----------------------------------------------------
 
         asset_data = {
             "type": asset_type,
@@ -768,36 +1108,25 @@ class AssetGenerationManager:
     ):
         """
         Icon generation is not implemented yet.
-
-        Future implementation:
-
-            structured icon spec
-                    ↓
-                SVG/vector
-                    ↓
-              editable PPT asset
         """
 
         asset_id = asset["id"]
 
         self.manifest.update_asset(
             asset_id,
-
             status="pending",
-
             source="pending",
-
             visual_spec=asset.get(
                 "visual_spec"
             ),
-
             error=None,
         )
 
         print()
         print(
             f"[PENDING] Icon generator "
-            f"not implemented yet: {asset_id}"
+            f"not implemented yet: "
+            f"{asset_id}"
         )
 
         return None
@@ -812,36 +1141,25 @@ class AssetGenerationManager:
     ):
         """
         Diagram generation is not implemented yet.
-
-        Future implementation:
-
-            structured diagram spec
-                    ↓
-                SVG/vector
-                    ↓
-              editable PPT elements
         """
 
         asset_id = asset["id"]
 
         self.manifest.update_asset(
             asset_id,
-
             status="pending",
-
             source="pending",
-
             visual_spec=asset.get(
                 "visual_spec"
             ),
-
             error=None,
         )
 
         print()
         print(
             f"[PENDING] Diagram generator "
-            f"not implemented yet: {asset_id}"
+            f"not implemented yet: "
+            f"{asset_id}"
         )
 
         return None
@@ -856,76 +1174,61 @@ class AssetGenerationManager:
     ):
         """
         Chart generation is not implemented yet.
-
-        Future implementation:
-
-            structured chart specification
-                    ↓
-              deterministic chart
-                    ↓
-              editable PPT chart
         """
 
         asset_id = asset["id"]
 
         self.manifest.update_asset(
             asset_id,
-
             status="pending",
-
             source="pending",
-
             visual_spec=asset.get(
                 "visual_spec"
             ),
-
             error=None,
         )
 
         print()
         print(
             f"[PENDING] Chart generator "
-            f"not implemented yet: {asset_id}"
+            f"not implemented yet: "
+            f"{asset_id}"
         )
 
         return None
 
     # =========================================================
-    # UNLOAD FLUX
+    # UNLOAD FLUX.2
     # =========================================================
 
     def _unload_flux(self):
         """
-        Safely unload FLUX.
-
-        This method is intentionally centralized so every
-        failure path uses the same model cleanup operation.
+        Release the FLUX.2 runtime.
         """
 
         try:
 
-            if (
-                self.router.image_model_manager.is_loaded()
-            ):
+            if self.flux2.is_loaded():
 
                 print()
                 print(
-                    "Releasing FLUX model..."
+                    "Releasing FLUX.2 Klein..."
                 )
 
-                self.router.image_model_manager.unload()
+                self.flux2.unload()
 
             else:
 
                 print(
-                    "FLUX is already unloaded."
+                    "FLUX.2 Klein is already "
+                    "released."
                 )
 
         except Exception as exc:
 
             print()
             print(
-                "Warning: FLUX unload failed:"
+                "Warning: FLUX.2 release failed:"
             )
 
             print(
@@ -941,7 +1244,7 @@ class AssetGenerationManager:
         assets: list[dict],
     ) -> bool:
         """
-        Return True only when every asset has been generated.
+        Return True only when every asset is completed.
         """
 
         if not assets:
@@ -966,7 +1269,9 @@ class AssetGenerationManager:
         """
 
         print()
-        print("Remaining assets:")
+        print(
+            "Remaining assets:"
+        )
 
         for asset in assets:
 
@@ -988,7 +1293,7 @@ class AssetGenerationManager:
         """
         Resume asset generation.
 
-        Only assets that are not completed will be processed.
+        Only incomplete assets are processed.
         """
 
         print()

@@ -42,3 +42,44 @@ Thumbs.db
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+venv_cuda/
+
+# Environment
+.env
+.env.*
+
+# Local models
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+models/
+
+# Local runtime binaries
+cudart-sd-bin-win-cu12-x64.zip
+cudart-sd-bin-win-cu12-x64/
+sd-master-3f8527a-bin-win-cuda12-x64.zip
+sd-master-3f8527a-bin-win-cuda12-x64/
+
+# Generated/output files
+generated/
+outputs/
+
+# Logs
+*.log
+stress_test.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
